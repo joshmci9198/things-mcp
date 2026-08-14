@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "things-mcp",
   "display_name": "Things MCP",
-  "version": "0.7.3",
+  "version": "0.8.1",
   "description": "Model Context Protocol server for Things 3 task management app",
   "long_description": "This extension provides comprehensive task management capabilities through the Things 3 app. It allows you to view, create, update, and search todos, projects, areas, and tags.",
   "author": {
@@ -15,7 +15,9 @@
     "entry_point": "server/stub.py",
     "mcp_config": {
       "command": "uvx",
-      "args": ["things-mcp"]
+      "args": [
+        "things-mcp"
+      ]
     }
   },
   "tools": [
@@ -64,6 +66,10 @@
       "description": "Get all tags"
     },
     {
+      "name": "get_tag_usage",
+      "description": "Report how many items use each tag, sorted by usage; flag unused tags"
+    },
+    {
       "name": "get_tagged_items",
       "description": "Get items with a specific tag"
     },
@@ -92,8 +98,20 @@
       "description": "Add a new project to Things"
     },
     {
+      "name": "add_area",
+      "description": "Create a new Area in Things 3 (via AppleScript)"
+    },
+    {
+      "name": "update_area",
+      "description": "Update an existing Area in Things 3 (rename or set tags; via AppleScript)"
+    },
+    {
       "name": "update_todo",
       "description": "Update an existing todo"
+    },
+    {
+      "name": "bulk_update_todos",
+      "description": "Apply the same update to many todos in a single operation"
     },
     {
       "name": "update_project",
@@ -108,10 +126,19 @@
       "description": "Search for items in Things"
     }
   ],
-  "keywords": ["things", "todo", "task", "project", "productivity", "macos"],
+  "keywords": [
+    "things",
+    "todo",
+    "task",
+    "project",
+    "productivity",
+    "macos"
+  ],
   "license": "MIT",
   "compatibility": {
     "claude_desktop": ">=0.10.0",
-    "platforms": ["darwin"]
+    "platforms": [
+      "darwin"
+    ]
   }
 }

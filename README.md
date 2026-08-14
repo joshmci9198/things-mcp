@@ -117,6 +117,7 @@ After installation:
 ### Tag Operations
 - `get-tags` - Get all tags
 - `get-tagged-items` - Get items with a specific tag
+- `get-tag-usage` - Report how many items use each tag, sorted by usage; flag unused tags for cleanup
 
 ### Search Operations
 - `search-todos` - Simple search by title/notes
@@ -128,12 +129,24 @@ After installation:
 ### Things URL Scheme Operations
 - `add-todo` - Create a new todo
 - `add-project` - Create a new project
+- `add-area` - Create a new Area (via AppleScript; Things URL scheme has no add-area command)
+- `update-area` - Update an existing Area: rename or set tags (via AppleScript)
 - `update-todo` - Update an existing todo
+- `bulk-update-todos` - Apply the same update to many todos in a single operation
 - `update-project` - Update an existing project
 - `show-item` - Show a specific item or list in Things
 - `search-items` - Search for items in Things
 
 ## Tool Parameters
+
+### Pagination (most read tools)
+The list/search read tools (`get-inbox`, `get-today`, `get-upcoming`, `get-anytime`, `get-someday`, `get-logbook`, `get-trash`, `get-todos`, `get-projects`, `get-areas`, `get-tags`, `get-tagged-items`, `get-headings`, `search-todos`, `search-advanced`, `get-recent`) accept optional pagination:
+- `limit` - Maximum number of items to return (default: all; `get-logbook` defaults to 50)
+- `offset` - Number of items to skip from the start (default: 0)
+
+When neither is set, output is unchanged. When set, a `Showing X-Y of Z items` header is prepended so you know how much more there is. An `offset` past the end is reported distinctly from an empty result.
+
+These same read tools also return **structured content** alongside the human-readable text: MCP clients receive the raw item dicts plus `count`/`total`/`offset`/`limit` under `structured_content`, so data can be consumed programmatically without parsing the formatted text.
 
 ### get-todos
 - `project_uuid` (optional) - Filter todos by project
@@ -153,6 +166,30 @@ After installation:
 
 ### get-recent
 - `period` - Time period (e.g., '3d', '1w', '2m', '1y')
+
+### get-logbook
+- `period` (optional, default: '7d') - Look-back window by completion date. Accepts `d`/`w`/`m`/`y` (e.g., '3d', '1w', '2m', '1y'); months ≈ 30 days, years ≈ 365 days
+- `limit` (optional, default: 50) - Maximum number of completed items to return
+
+### get-tag-usage
+- `only_unused` (optional, default: false) - Return only tags that no item references (cleanup candidates)
+
+### update-todo (checklist & tags)
+- `tags` - Replace all tags on the todo
+- `add_tags` - Append tags without removing existing ones
+- `checklist_items` - Replace the entire checklist with this list
+- `prepend_checklist_items` - Add these items to the top of the checklist
+- `append_checklist_items` - Add these items to the bottom of the checklist
+
+### bulk-update-todos
+Applies the same change to every todo in `ids` in a single operation. Requires the Things auth token to be enabled (Things → Settings → General → Enable Things URLs → Manage); the server reads it automatically.
+- `ids` (required) - List of todo UUIDs to update
+- `list` / `list_id` - Move all into a project/area (by title or UUID)
+- `tags` / `add_tags` - Replace or append tags on all
+- `when` - Reschedule all (keyword or YYYY-MM-DD)
+- `deadline` - Set deadline on all (YYYY-MM-DD)
+- `heading` / `heading_id` - Move all under a heading (by title or UUID)
+- `completed` / `canceled` - Mark all completed or canceled
 
 ### Scheduling with Reminders (add-todo, add-project, update-todo, update-project)
 - `when` - Accepts multiple formats:

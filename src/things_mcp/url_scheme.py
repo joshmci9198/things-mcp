@@ -1,7 +1,8 @@
+import json as _json
 import urllib.parse
 import subprocess
 import things
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, List, Union
 
 # When parameter accepted values:
 # - Keywords: "today", "tomorrow", "evening", "anytime", "someday"
@@ -40,6 +41,68 @@ def execute_url(url: str) -> None:
         # Fallback - still try with open -g directly
         subprocess.run(['open', '-g', url], check=True)
 
+
+def add_area(title: str) -> str:
+    """Create a new Area in Things 3 via AppleScript.
+
+    The Things URL scheme has no add-area command, so we use AppleScript instead.
+    Returns the new Area's UUID.
+    """
+    escaped_title = title.replace('\\', '\\\\').replace('"', '\\"')
+    applescript = (
+        'tell application "Things3"\n'
+        f'  set newArea to make new area with properties {{name:"{escaped_title}"}}\n'
+        '  return id of newArea\n'
+        'end tell'
+    )
+    result = subprocess.run(
+        ['osascript', '-e', applescript],
+        check=True, capture_output=True, text=True
+    )
+    return result.stdout.strip()
+
+
+def update_area(area_id: str, title: Optional[str] = None,
+                tags: Optional[list[str]] = None) -> None:
+    """Update an existing Area in Things 3 via AppleScript.
+
+    The Things URL scheme has no area operations, so we use AppleScript.
+    Only the parameters that are provided are changed.
+
+    Note: there is deliberately no delete_area — deleting an Area in Things
+    also deletes every project it contains, which is destructive and not
+    recoverable.
+
+    Args:
+        area_id: UUID of the area to update
+        title: New name for the area
+        tags: Tags to set on the area (replaces existing; Things only applies
+            tags that already exist)
+    """
+    def esc(s: str) -> str:
+        return s.replace('\\', '\\\\').replace('"', '\\"')
+
+    statements = []
+    if title is not None:
+        statements.append(f'set name of theArea to "{esc(title)}"')
+    if tags is not None:
+        statements.append(f'set tag names of theArea to "{esc(",".join(tags))}"')
+    if not statements:
+        return
+
+    body = '\n  '.join(statements)
+    applescript = (
+        'tell application "Things3"\n'
+        f'  set theArea to area id "{esc(area_id)}"\n'
+        f'  {body}\n'
+        'end tell'
+    )
+    subprocess.run(
+        ['osascript', '-e', applescript],
+        check=True, capture_output=True, text=True
+    )
+
+
 def construct_url(command: str, params: Dict[str, Any]) -> str:
     """Construct a Things URL from command and parameters."""
     # Start with base URL
@@ -63,7 +126,10 @@ def construct_url(command: str, params: Dict[str, Any]) -> str:
             # Handle lists (for tags, checklist items etc)
             elif isinstance(value, list):
                 value = ','.join(str(v) for v in value)
-            encoded_params.append(f"{key}={urllib.parse.quote(str(value))}")
+            # safe='' so '/' inside values (e.g. "2/13" in a title) is percent-encoded
+            # as %2F. urllib.parse.quote's default safe='/' would leave it as a literal
+            # slash, which Things parses as a path delimiter and silently truncates.
+            encoded_params.append(f"{key}={urllib.parse.quote(str(value), safe='')}")
 
         url += "?" + "&".join(encoded_params)
 
@@ -149,10 +215,15 @@ def add_project(title: str, notes: Optional[str] = None, when: Optional[str] = N
 
 def update_todo(id: str, title: Optional[str] = None, notes: Optional[str] = None,
                 when: Optional[str] = None, deadline: Optional[str] = None,
-                tags: Optional[list[str]] = None, completed: Optional[bool] = None,
+                tags: Optional[list[str]] = None,
+                add_tags: Optional[list[str]] = None,
+                completed: Optional[bool] = None,
                 canceled: Optional[bool] = None, list: Optional[str] = None,
                 list_id: Optional[str] = None, heading: Optional[str] = None,
-                heading_id: Optional[str] = None) -> str:
+                heading_id: Optional[str] = None,
+                checklist_items: Optional[list[str]] = None,
+                prepend_checklist_items: Optional[list[str]] = None,
+                append_checklist_items: Optional[list[str]] = None) -> str:
     """Construct URL to update an existing todo.
 
     Args:
@@ -165,12 +236,16 @@ def update_todo(id: str, title: Optional[str] = None, notes: Optional[str] = Non
             - DateTime (adds reminder): "yyyy-mm-dd@HH:MM" (e.g., "2024-01-15@14:30")
         deadline: New deadline (yyyy-mm-dd)
         tags: New tags (replaces existing)
+        add_tags: Tags to append to the existing list (does not remove existing)
         completed: Mark as completed
         canceled: Mark as canceled
         list: Title of project/area to move to
         list_id: UUID of project/area to move to (takes precedence over list)
         heading: Heading title to move under
         heading_id: UUID of heading to move under (takes precedence over heading)
+        checklist_items: Replace the entire checklist with these items
+        prepend_checklist_items: Add these items to the start of the checklist
+        append_checklist_items: Add these items to the end of the checklist
     """
     params = {
         'id': id,
@@ -179,12 +254,16 @@ def update_todo(id: str, title: Optional[str] = None, notes: Optional[str] = Non
         'when': when,
         'deadline': deadline,
         'tags': tags,
+        'add-tags': add_tags,
         'completed': completed,
         'canceled': canceled,
         'list': list,
         'list-id': list_id,
         'heading': heading,
-        'heading-id': heading_id
+        'heading-id': heading_id,
+        'checklist-items': '\n'.join(checklist_items) if checklist_items else None,
+        'prepend-checklist-items': '\n'.join(prepend_checklist_items) if prepend_checklist_items else None,
+        'append-checklist-items': '\n'.join(append_checklist_items) if append_checklist_items else None,
     }
     return construct_url('update', {k: v for k, v in params.items() if v is not None})
 
@@ -218,6 +297,23 @@ def update_project(id: str, title: Optional[str] = None, notes: Optional[str] = 
         'canceled': canceled
     }
     return construct_url('update-project', {k: v for k, v in params.items() if v is not None})
+
+def json_command(payload: List[Dict[str, Any]], auth_token: Optional[str] = None) -> str:
+    """Construct a URL for Things' multi-operation 'json' endpoint.
+
+    Each entry in payload follows the shape:
+        {"type": "to-do", "operation": "create" | "update", "id"?: "<uuid>",
+         "attributes": {... using hyphenated attribute names ...}}
+
+    auth-token is required by Things whenever payload contains an 'update'
+    operation; we include it whenever supplied so callers don't have to
+    pre-classify the batch.
+    """
+    parts = [f"data={urllib.parse.quote(_json.dumps(payload), safe='')}"]
+    if auth_token:
+        parts.append(f"auth-token={urllib.parse.quote(auth_token, safe='')}")
+    return "things:///json?" + "&".join(parts)
+
 
 def show(id: str, query: Optional[str] = None, filter_tags: Optional[list[str]] = None) -> str:
     """Construct URL to show a specific item or list."""

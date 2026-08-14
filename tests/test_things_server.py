@@ -1,5 +1,13 @@
+import json
+import urllib.parse
+from datetime import datetime, timedelta
 import pytest
-from things_mcp.server import get_todos, get_today, search_todos, search_advanced
+from tests._helpers import tool_text
+from things_mcp.server import (
+    get_todos, get_today, get_inbox, search_todos, search_advanced,
+    get_logbook, _parse_logbook_period, _today_fallback, get_tag_usage,
+    bulk_update_todos,
+)
 
 
 @pytest.mark.asyncio
@@ -7,11 +15,53 @@ async def test_get_todos_includes_checklist(mocker, mock_todo):
     mock_things_todos = mocker.patch('things.todos')
     mock_things_todos.return_value = [mock_todo]
 
-    result = await get_todos.fn(include_items=True)
+    result = await get_todos(include_items=True)
 
-    assert "Checklist:" in result
-    assert "First item" in result
+    # get_todos now returns a ToolResult: human-readable text in channel 1...
+    text = result.content[0].text
+    assert "Checklist:" in text
+    assert "First item" in text
     mock_things_todos.assert_called_once_with(project=None, start=None, include_items=True)
+
+
+@pytest.mark.asyncio
+async def test_get_todos_returns_structured_content(mocker, mock_todo):
+    """get_todos also exposes structured JSON (channel 2) for programmatic clients."""
+    mocker.patch('things.todos', return_value=[mock_todo])
+
+    result = await get_todos(include_items=True)
+
+    sc = result.structured_content
+    assert sc["count"] == 1
+    assert sc["total"] == 1
+    assert sc["items"][0]["uuid"] == mock_todo["uuid"]
+    # raw things.py dicts (which can contain date objects) are JSON-safe
+    import json as _json
+    _json.dumps(sc)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_get_todos_structured_reflects_pagination(mocker):
+    """structured_content paginates in lockstep with the text and reports totals."""
+    mocker.patch('things.todos', return_value=[
+        {'uuid': str(i), 'title': f'T{i}', 'type': 'to-do', 'status': 'open'} for i in range(5)
+    ])
+
+    result = await get_todos(limit=2, offset=1)
+
+    sc = result.structured_content
+    assert sc["total"] == 5
+    assert sc["count"] == 2
+    assert [it["uuid"] for it in sc["items"]] == ["1", "2"]
+    assert "Showing 2-3 of 5 items" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_get_todos_invalid_project_uuid_structured_error(mocker):
+    mocker.patch('things.get', return_value=None)
+    result = await get_todos(project_uuid="bad")
+    assert "Invalid project UUID" in result.content[0].text
+    assert "error" in result.structured_content
 
 
 @pytest.mark.asyncio
@@ -19,7 +69,7 @@ async def test_get_today_includes_checklist(mocker, mock_todo):
     mock_today = mocker.patch('things.today')
     mock_today.return_value = [mock_todo]
 
-    result = await get_today.fn()
+    result = tool_text(await get_today())
 
     assert "Checklist:" in result
     assert "First item" in result
@@ -27,11 +77,52 @@ async def test_get_today_includes_checklist(mocker, mock_todo):
 
 
 @pytest.mark.asyncio
+async def test_get_today_recovers_from_things_py_sort_typeerror(mocker, mock_todo):
+    """Regression for #43: when things.today() crashes on the upstream
+    None-vs-str sort, get_today should fall back to a local safe aggregation."""
+    mocker.patch(
+        'things.today',
+        side_effect=TypeError("'<' not supported between instances of 'NoneType' and 'str'"),
+    )
+    mock_tasks = mocker.patch('things.tasks')
+    # First call (regular_today_tasks) has a dated task; second (unconfirmed_scheduled)
+    # is empty; third (unconfirmed_overdue) yields a deadline-only task with start_date=None.
+    overdue = {
+        'uuid': 'overdue-uuid',
+        'title': 'Overdue with no start_date',
+        'type': 'to-do',
+        'status': 'open',
+        'today_index': 0,
+        'start_date': None,
+        'deadline': '2026-06-04',
+    }
+    mock_tasks.side_effect = [[mock_todo], [], [overdue]]
+
+    result = tool_text(await get_today())
+
+    assert "Test Todo" in result
+    assert "Overdue with no start_date" in result
+
+
+def test_today_fallback_sort_handles_none_start_date(mocker):
+    """The fallback must not raise TypeError when start_date is None."""
+    dated = {'uuid': 'a', 'title': 'A', 'today_index': 1, 'start_date': '2026-06-04'}
+    undated = {'uuid': 'b', 'title': 'B', 'today_index': 0, 'start_date': None}
+    mock_tasks = mocker.patch('things.tasks')
+    mock_tasks.side_effect = [[dated], [], [undated]]
+
+    result = _today_fallback()
+
+    # Undated row sorts after the dated one because we push None to the end.
+    assert [r['uuid'] for r in result] == ['b', 'a']
+
+
+@pytest.mark.asyncio
 async def test_search_todos_includes_checklist(mocker, mock_todo):
     mock_search = mocker.patch('things.search')
     mock_search.return_value = [mock_todo]
 
-    result = await search_todos.fn("Test")
+    result = tool_text(await search_todos("Test"))
 
     assert "Checklist:" in result
     assert "First item" in result
@@ -44,7 +135,7 @@ async def test_search_advanced_with_type_project(mocker, mock_project):
     mock_things_tasks = mocker.patch('things.tasks')
     mock_things_tasks.return_value = [mock_project]
 
-    result = await search_advanced.fn(type="project")
+    result = tool_text(await search_advanced(type="project"))
 
     # Should call things.tasks() with type parameter, not things.todos()
     mock_things_tasks.assert_called_once_with(
@@ -59,10 +150,308 @@ async def test_search_advanced_without_type(mocker, mock_todo):
     mock_things_todos = mocker.patch('things.todos')
     mock_things_todos.return_value = [mock_todo]
 
-    result = await search_advanced.fn(status="incomplete")
+    result = tool_text(await search_advanced(status="incomplete"))
 
     # Should call things.todos() when no type specified
     mock_things_todos.assert_called_once_with(
         include_items=True, status="incomplete"
     )
     assert "Test Todo" in result
+
+
+# --- get_logbook (#46): filter by stop_date, not creation date ----------------
+
+def _completed(uuid, title, stop_date):
+    return {
+        'uuid': uuid,
+        'title': title,
+        'type': 'to-do',
+        'status': 'completed',
+        'stop_date': stop_date,
+    }
+
+
+def test_parse_logbook_period_accepts_dwmy():
+    assert _parse_logbook_period('7d') == timedelta(days=7)
+    assert _parse_logbook_period('2w') == timedelta(days=14)
+    assert _parse_logbook_period('3m') == timedelta(days=90)
+    assert _parse_logbook_period('1y') == timedelta(days=365)
+
+
+def test_parse_logbook_period_rejects_garbage():
+    assert _parse_logbook_period('') is None
+    assert _parse_logbook_period('week') is None
+    assert _parse_logbook_period('7') is None
+    assert _parse_logbook_period('-3d') is None
+
+
+@pytest.mark.asyncio
+async def test_get_logbook_includes_tasks_completed_in_window_even_if_created_earlier(mocker):
+    """Regression for #46: tasks created long ago but completed recently must appear."""
+    today = datetime.now().date().isoformat()
+    long_ago_completed_recently = _completed('a', 'Old task done today', today)
+    mocker.patch('things.tasks', return_value=[long_ago_completed_recently])
+
+    result = tool_text(await get_logbook(period='7d'))
+
+    assert 'Old task done today' in result
+
+
+@pytest.mark.asyncio
+async def test_get_logbook_excludes_tasks_completed_before_window(mocker):
+    long_ago = (datetime.now() - timedelta(days=60)).date().isoformat()
+    today = datetime.now().date().isoformat()
+    mocker.patch('things.tasks', return_value=[
+        _completed('a', 'Within window', today),
+        _completed('b', 'Outside window', long_ago),
+    ])
+
+    result = tool_text(await get_logbook(period='7d'))
+
+    assert 'Within window' in result
+    assert 'Outside window' not in result
+
+
+@pytest.mark.asyncio
+async def test_get_logbook_sorts_newest_completion_first(mocker):
+    today = datetime.now().date().isoformat()
+    yesterday = (datetime.now() - timedelta(days=1)).date().isoformat()
+    two_days_ago = (datetime.now() - timedelta(days=2)).date().isoformat()
+    mocker.patch('things.tasks', return_value=[
+        _completed('a', 'Two days ago', two_days_ago),
+        _completed('b', 'Today', today),
+        _completed('c', 'Yesterday', yesterday),
+    ])
+
+    result = tool_text(await get_logbook(period='7d'))
+
+    assert result.index('Today') < result.index('Yesterday') < result.index('Two days ago')
+
+
+@pytest.mark.asyncio
+async def test_get_logbook_respects_limit(mocker):
+    today = datetime.now().date().isoformat()
+    mocker.patch('things.tasks', return_value=[
+        _completed(f'u{i}', f'Task {i}', today) for i in range(10)
+    ])
+
+    result = tool_text(await get_logbook(period='7d', limit=3))
+
+    assert sum(1 for line in result.split('\n') if line.startswith('Title:')) == 3
+
+
+@pytest.mark.asyncio
+async def test_get_logbook_invalid_period(mocker):
+    mocker.patch('things.tasks', return_value=[])
+
+    result = tool_text(await get_logbook(period='lol'))
+
+    assert 'Invalid period' in result
+
+
+# --- get_tag_usage (#14) ------------------------------------------------------
+
+def _set_tag_data(mocker, *, tags, open_counts, all_counts):
+    """Wire up things.tags / things.todos / things.tasks for tag-usage tests.
+
+    open_counts and all_counts are dicts keyed by tag title.
+    """
+    mocker.patch('things.tags', return_value=[{'title': t, 'uuid': f'u-{t}'} for t in tags])
+    mocker.patch('things.todos', side_effect=lambda tag, **kw: [0] * open_counts.get(tag, 0))
+    mocker.patch('things.tasks', side_effect=lambda tag, **kw: [0] * all_counts.get(tag, 0))
+
+
+@pytest.mark.asyncio
+async def test_get_tag_usage_sorts_by_total_desc(mocker):
+    _set_tag_data(
+        mocker,
+        tags=['work', 'home', 'shopping'],
+        open_counts={'work': 5, 'home': 2, 'shopping': 0},
+        all_counts={'work': 30, 'home': 10, 'shopping': 0},
+    )
+
+    result = await get_tag_usage()
+
+    lines = result.split('\n')
+    assert lines[0].startswith('work:')
+    assert lines[1].startswith('home:')
+    assert lines[2].startswith('shopping:')
+    assert '5 open, 30 total' in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_get_tag_usage_only_unused(mocker):
+    _set_tag_data(
+        mocker,
+        tags=['work', 'old-tag-1', 'old-tag-2'],
+        open_counts={'work': 5, 'old-tag-1': 0, 'old-tag-2': 0},
+        all_counts={'work': 30, 'old-tag-1': 0, 'old-tag-2': 0},
+    )
+
+    result = await get_tag_usage(only_unused=True)
+
+    assert 'old-tag-1' in result
+    assert 'old-tag-2' in result
+    assert 'work' not in result
+
+
+@pytest.mark.asyncio
+async def test_get_tag_usage_empty(mocker):
+    mocker.patch('things.tags', return_value=[])
+    result = await get_tag_usage()
+    assert result == 'No tags found'
+
+
+# --- bulk_update_todos (#22) --------------------------------------------------
+
+def _captured_json_payload(mock_execute_url):
+    """Pull the json payload out of the URL handed to execute_url."""
+    url = mock_execute_url.call_args[0][0]
+    qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    return json.loads(qs['data'][0])
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_todos_empty_ids(mocker):
+    mocker.patch('things_mcp.server.url_scheme.execute_url')
+    result = await bulk_update_todos(ids=[], list="Shopping")
+    assert "No items to update" in result
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_todos_no_changes(mocker):
+    mocker.patch('things.token', return_value='tok')
+    mocker.patch('things_mcp.server.url_scheme.execute_url')
+    result = await bulk_update_todos(ids=["u1"])
+    assert "No changes specified" in result
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_todos_missing_token(mocker):
+    mocker.patch('things.token', return_value=None)
+    mocker.patch('things_mcp.server.url_scheme.execute_url')
+    result = await bulk_update_todos(ids=["u1"], list="Shopping")
+    assert "THINGS_AUTH_TOKEN" in result
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_todos_moves_many_in_one_call(mocker):
+    mocker.patch('things.token', return_value='tok')
+    mock_exec = mocker.patch('things_mcp.server.url_scheme.execute_url')
+
+    result = await bulk_update_todos(
+        ids=["u1", "u2", "u3"], list_id="shopping-uuid"
+    )
+
+    # Exactly one URL invocation, not N
+    assert mock_exec.call_count == 1
+    assert "3 todos" in result
+    payload = _captured_json_payload(mock_exec)
+    assert len(payload) == 3
+    assert all(p["operation"] == "update" for p in payload)
+    assert [p["id"] for p in payload] == ["u1", "u2", "u3"]
+    assert all(p["attributes"] == {"list-id": "shopping-uuid"} for p in payload)
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_todos_list_id_overrides_list_title(mocker):
+    mocker.patch('things.token', return_value='tok')
+    mock_exec = mocker.patch('things_mcp.server.url_scheme.execute_url')
+
+    await bulk_update_todos(ids=["u1"], list="By Title", list_id="by-uuid")
+
+    payload = _captured_json_payload(mock_exec)
+    assert payload[0]["attributes"] == {"list-id": "by-uuid"}
+    assert "list" not in payload[0]["attributes"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_todos_complete_and_tag(mocker):
+    mocker.patch('things.token', return_value='tok')
+    mock_exec = mocker.patch('things_mcp.server.url_scheme.execute_url')
+
+    await bulk_update_todos(
+        ids=["u1", "u2"], completed=True, add_tags=["reviewed"]
+    )
+
+    payload = _captured_json_payload(mock_exec)
+    for p in payload:
+        assert p["attributes"]["completed"] is True
+        assert p["attributes"]["add-tags"] == ["reviewed"]
+
+
+# --- pagination: limit / offset across read tools (#41) -----------------------
+
+def _ptodo(uuid, title):
+    return {'uuid': uuid, 'title': title, 'type': 'to-do', 'status': 'open'}
+
+
+@pytest.mark.asyncio
+async def test_pagination_no_params_preserves_legacy_output(mocker):
+    """No limit/offset → no 'Showing' header, byte-identical to old behavior."""
+    mocker.patch('things.inbox', return_value=[_ptodo('a', 'Alpha'), _ptodo('b', 'Beta')])
+    result = tool_text(await get_inbox())
+    assert 'Showing' not in result
+    assert 'Alpha' in result and 'Beta' in result
+
+
+@pytest.mark.asyncio
+async def test_pagination_limit_truncates_with_header(mocker):
+    mocker.patch('things.inbox', return_value=[_ptodo(str(i), f'T{i}') for i in range(5)])
+    result = tool_text(await get_inbox(limit=2))
+    assert 'Showing 1-2 of 5 items' in result
+    assert 'T0' in result and 'T1' in result and 'T2' not in result
+
+
+@pytest.mark.asyncio
+async def test_pagination_offset_skips(mocker):
+    mocker.patch('things.inbox', return_value=[_ptodo(str(i), f'T{i}') for i in range(5)])
+    result = tool_text(await get_inbox(limit=2, offset=2))
+    assert 'Showing 3-4 of 5 items' in result
+    assert 'T2' in result and 'T3' in result
+    assert 'T0' not in result and 'T4' not in result
+
+
+@pytest.mark.asyncio
+async def test_pagination_offset_past_end_is_distinct_from_empty(mocker):
+    mocker.patch('things.inbox', return_value=[_ptodo('a', 'Alpha')])
+    result = tool_text(await get_inbox(offset=5))
+    assert 'offset 5 is past the end' in result
+
+
+@pytest.mark.asyncio
+async def test_pagination_rejects_nonpositive_limit_before_fetch(mocker):
+    inbox = mocker.patch('things.inbox')
+    result = tool_text(await get_inbox(limit=0))
+    assert 'limit must be' in result
+    inbox.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pagination_rejects_negative_offset_before_fetch(mocker):
+    inbox = mocker.patch('things.inbox')
+    result = tool_text(await get_inbox(offset=-1))
+    assert 'offset must be' in result
+    inbox.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pagination_applies_after_someday_filtering(mocker):
+    """get_today filters Someday-project tasks BEFORE paginating, so the
+    total in the header reflects the filtered count."""
+    mocker.patch('things.today', return_value=[_ptodo(str(i), f'T{i}') for i in range(4)])
+    mocker.patch(
+        'things_mcp.server.filter_someday_project_tasks',
+        side_effect=lambda todos: [t for t in todos if t['title'] != 'T0'],
+    )
+    result = tool_text(await get_today(limit=2))
+    assert 'Showing 1-2 of 3 items' in result
+    assert 'T1' in result and 'T2' in result and 'T0' not in result
+
+
+@pytest.mark.asyncio
+async def test_get_logbook_supports_offset(mocker):
+    today = datetime.now().date().isoformat()
+    mocker.patch('things.tasks', return_value=[_completed(f'u{i}', f'L{i}', today) for i in range(5)])
+    result = tool_text(await get_logbook(period='7d', limit=2, offset=2))
+    assert 'Showing 3-4 of 5 items' in result

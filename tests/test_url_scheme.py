@@ -1,9 +1,12 @@
+import json
 import pytest
 from unittest.mock import patch, Mock
 import subprocess
+import urllib.parse
 from things_mcp.url_scheme import (
-    execute_url, construct_url, add_todo, add_project,
-    update_todo, update_project, show, search, format_when_with_reminder
+    execute_url, construct_url, add_todo, add_project, add_area, update_area,
+    update_todo, update_project, show, search, format_when_with_reminder,
+    json_command,
 )
 
 
@@ -35,6 +38,101 @@ class TestExecuteUrl:
 
         assert mock_run.call_count == 2
         mock_run.assert_called_with(['open', '-g', 'things:///add?title=Test'], check=True)
+
+
+class TestAddArea:
+    """Test the add_area function (AppleScript-based since URL scheme has no add-area)."""
+
+    @patch('subprocess.run')
+    def test_add_area_basic(self, mock_run):
+        """Test basic Area creation returns the new UUID."""
+        mock_run.return_value = Mock(stdout="ABC123XYZ\n", returncode=0)
+
+        uuid = add_area("Backlog")
+
+        assert uuid == "ABC123XYZ"
+        mock_run.assert_called_once()
+        args, kwargs = mock_run.call_args
+        assert args[0][0] == 'osascript'
+        assert args[0][1] == '-e'
+        assert 'tell application "Things3"' in args[0][2]
+        assert 'name:"Backlog"' in args[0][2]
+        assert kwargs.get('check') is True
+        assert kwargs.get('capture_output') is True
+        assert kwargs.get('text') is True
+
+    @patch('subprocess.run')
+    def test_add_area_escapes_double_quotes(self, mock_run):
+        """Titles containing double quotes are escaped to prevent AppleScript injection."""
+        mock_run.return_value = Mock(stdout="UUID1\n", returncode=0)
+
+        add_area('Project "Alpha"')
+
+        script = mock_run.call_args[0][0][2]
+        assert 'name:"Project \\"Alpha\\""' in script
+
+    @patch('subprocess.run')
+    def test_add_area_escapes_backslashes(self, mock_run):
+        """Backslashes in titles are escaped before quote escaping."""
+        mock_run.return_value = Mock(stdout="UUID2\n", returncode=0)
+
+        add_area('foo\\bar')
+
+        script = mock_run.call_args[0][0][2]
+        assert 'name:"foo\\\\bar"' in script
+
+
+class TestUpdateArea:
+    """Test the update_area function (AppleScript-based; URL scheme has no area ops)."""
+
+    @patch('subprocess.run')
+    def test_update_area_renames(self, mock_run):
+        """Setting title emits 'set name of theArea' targeting the given id."""
+        mock_run.return_value = Mock(returncode=0)
+
+        update_area('AREA1', title='Renamed')
+
+        mock_run.assert_called_once()
+        script = mock_run.call_args[0][0][2]
+        assert 'area id "AREA1"' in script
+        assert 'set name of theArea to "Renamed"' in script
+
+    @patch('subprocess.run')
+    def test_update_area_sets_tags(self, mock_run):
+        """Tags are comma-joined into the 'tag names' property."""
+        mock_run.return_value = Mock(returncode=0)
+
+        update_area('AREA1', tags=['Work', 'Home'])
+
+        script = mock_run.call_args[0][0][2]
+        assert 'set tag names of theArea to "Work,Home"' in script
+
+    @patch('subprocess.run')
+    def test_update_area_title_and_tags_together(self, mock_run):
+        """Both fields produce both statements in one AppleScript call."""
+        mock_run.return_value = Mock(returncode=0)
+
+        update_area('AREA1', title='New', tags=['Work'])
+
+        script = mock_run.call_args[0][0][2]
+        assert 'set name of theArea to "New"' in script
+        assert 'set tag names of theArea to "Work"' in script
+
+    @patch('subprocess.run')
+    def test_update_area_escapes_quotes(self, mock_run):
+        """Double quotes in the title are escaped to prevent AppleScript injection."""
+        mock_run.return_value = Mock(returncode=0)
+
+        update_area('AREA1', title='Area "X"')
+
+        script = mock_run.call_args[0][0][2]
+        assert 'set name of theArea to "Area \\"X\\""' in script
+
+    @patch('subprocess.run')
+    def test_update_area_noop_when_nothing_provided(self, mock_run):
+        """With no fields, no AppleScript runs at all."""
+        update_area('AREA1')
+        mock_run.assert_not_called()
 
 
 class TestConstructUrl:
@@ -71,6 +169,13 @@ class TestConstructUrl:
         url = construct_url("add", params)
         assert "tags=work%2Curgent" in url
     
+    def test_construct_url_encodes_slash_in_values(self):
+        """Slashes in parameter values must be percent-encoded (issue #47)."""
+        params = {"title": "Example 2/13 project title"}
+        url = construct_url("update-project", params)
+        assert "title=Example%202%2F13%20project%20title" in url
+        assert "2/13" not in url
+
     @patch('things.token')
     def test_construct_url_auth_token_update(self, mock_token):
         """Test auth token inclusion for update command."""
@@ -215,6 +320,36 @@ class TestUpdateTodo:
         assert "heading-id=heading-uuid" in url
 
 
+    @patch('things.token')
+    def test_update_todo_replaces_checklist(self, mock_token):
+        """checklist_items replaces the entire checklist via 'checklist-items' param."""
+        mock_token.return_value = "auth-token"
+        url = update_todo(id="todo-123", checklist_items=["Step 1", "Step 2"])
+        # newline join → "Step 1\nStep 2", then URL-encoded to %0A between items
+        assert "checklist-items=Step%201%0AStep%202" in url
+
+    @patch('things.token')
+    def test_update_todo_prepends_checklist(self, mock_token):
+        mock_token.return_value = "auth-token"
+        url = update_todo(id="todo-123", prepend_checklist_items=["New first"])
+        assert "prepend-checklist-items=New%20first" in url
+
+    @patch('things.token')
+    def test_update_todo_appends_checklist(self, mock_token):
+        mock_token.return_value = "auth-token"
+        url = update_todo(id="todo-123", append_checklist_items=["Extra A", "Extra B"])
+        assert "append-checklist-items=Extra%20A%0AExtra%20B" in url
+
+    @patch('things.token')
+    def test_update_todo_add_tags_appends(self, mock_token):
+        """add_tags maps to URL scheme 'add-tags' (append, doesn't replace)."""
+        mock_token.return_value = "auth-token"
+        url = update_todo(id="todo-123", add_tags=["new1", "new2"])
+        assert "add-tags=new1%2Cnew2" in url
+        # 'tags=' (without the add- prefix) should not be present when only add_tags is set
+        assert "&tags=" not in url and not url.endswith("tags=new1%2Cnew2")
+
+
 class TestUpdateProject:
     """Test the update_project function."""
     
@@ -314,3 +449,33 @@ class TestFormatWhenWithReminder:
         when = format_when_with_reminder("2024-06-15", "10:00")
         url = add_todo("Test task", when=when)
         assert "when=2024-06-15%4010%3A00" in url  # @ is %40, : is %3A
+
+
+class TestJsonCommand:
+    """Test the json_command function used for bulk operations."""
+
+    def _decode_data_param(self, url: str):
+        assert url.startswith("things:///json?")
+        parsed = urllib.parse.urlparse(url)
+        qs = urllib.parse.parse_qs(parsed.query)
+        return json.loads(qs['data'][0]), qs
+
+    def test_json_command_includes_auth_token(self):
+        url = json_command([{"type": "to-do", "attributes": {"title": "x"}}], auth_token="abc")
+        _, qs = self._decode_data_param(url)
+        assert qs['auth-token'] == ['abc']
+
+    def test_json_command_skips_token_when_absent(self):
+        url = json_command([{"type": "to-do", "attributes": {"title": "x"}}])
+        assert "auth-token=" not in url
+
+    def test_json_command_serializes_multiple_updates(self):
+        payload = [
+            {"type": "to-do", "operation": "update", "id": "u1",
+             "attributes": {"list-id": "shopping-uuid"}},
+            {"type": "to-do", "operation": "update", "id": "u2",
+             "attributes": {"list-id": "shopping-uuid"}},
+        ]
+        url = json_command(payload, auth_token="t")
+        decoded, _ = self._decode_data_param(url)
+        assert decoded == payload
