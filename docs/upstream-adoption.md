@@ -65,23 +65,23 @@ Record the answer below either way. "Considered and declined" is as valuable as
 
 ## Decisions
 
-### Pending — from v0.8.0 / v0.8.1, not yet merged
+### Pending — REST adoption candidates (merged to `/mcp` on 2026-08-13, not exposed over REST)
 
 | Change | Surface | Decision | Notes |
 |---|---|---|---|
-| URL encoding: slashes truncate (#47) | `url_scheme.py` | **Take** | Arrives with merge. Affects all four REST write routes today; a title like `Example 2/13` is silently truncated. |
-| `get_today` None-safe sort (#43) | `server.py` + upstream `things.today()` | **Take** | The crash is in `things.today()`, which `/api/today` calls directly. |
-| `get_logbook` completion-date filter (#46) | `server.py` | **Already fixed locally** | Same bug, fixed independently in `completed_since()`. On merge, check whether upstream's version supersedes ours or duplicates it. |
-| `bulk_update_todos` | `server.py` | **Undecided** | Strongest REST candidate: batch weekly-review moves are exactly an automation job. Needs `THINGS_AUTH_TOKEN`. |
-| `get_tag_usage` | `server.py` | **Undecided** | Useful interactively via `/mcp`. No known automation wants it over HTTP. |
-| `add_area` / `update_area` | `server.py` | **Undecided** | Introduces AppleScript as a third write mechanism alongside SQLite reads and URL-scheme writes. Worth knowing before adopting. No `delete_area` upstream, deliberately — deleting an area deletes every project inside it. |
-| Pagination (`limit`/`offset`) | `server.py` | **Undecided** | REST routes return whole lists today. Only matters if a consumer starts choking on volume. |
-| Structured responses | `server.py` | **N/A for REST** | REST already returns raw JSON dicts. This is MCP-side only. |
+| `bulk_update_todos` | `/mcp` only | **Undecided** | Strongest REST candidate: batch weekly-review moves are exactly an automation job. Needs `THINGS_AUTH_TOKEN`. |
+| `get_tag_usage` | `/mcp` only | **Undecided** | Useful interactively via `/mcp`. No known automation wants it over HTTP. |
+| `add_area` / `update_area` | `/mcp` only | **Undecided** | These introduced AppleScript as a third write mechanism. Already live on `/mcp` via the merge; exposing over REST is a separate decision. Still nothing can delete an area — preserve that. |
+| Pagination (`limit`/`offset`) | `/mcp` only | **Undecided** | REST routes return whole lists today. Only matters if a consumer starts choking on volume. |
 
 ### Settled
 
 | Change | Decision | Why |
 |---|---|---|
-| FastMCP 3.x migration | **Deferred, blocking the v0.8.1 merge** | `api_server.py` calls `mcp.http_app(path="/")`, which upstream doesn't use, so 3.x compatibility is untested. Treat as a migration with its own branch and a real restart test, not part of a routine sync. |
+| v0.8.1 merge + FastMCP 3.x migration | **Done 2026-08-13** | Merged into `wired`; one conflict (`pyproject.toml` pins). `mcp.http_app(path=...)` exists in FastMCP 3.4.0 with a compatible signature — the compatibility question is closed. Verified live: 174 tests pass, REST baseline unchanged (4/4 SSNC items, fields resolved), MCP handshake + `tools/list` returns all 26 tools. Pin now bounded `>=3.0.0,<4`. |
+| URL encoding: slashes truncate (#47) | **Arrived with merge** | All four REST write routes now percent-encode `/` via the shared `url_scheme.py`. |
+| `get_today` None-safe sort (#43) | **Arrived with merge** | `/mcp` `get_today` no longer crashes on deadline-only overdue items. Note: `/api/today` calls `things.today()` directly and never used the crashing sort in `server.py`. |
+| `get_logbook` completion-date filter (#46) | **Parallel, both kept** | Upstream's fix lives in `server.py` (`get_logbook`), ours in `api_server.py` (`completed_since()`), serving different surfaces. Same principle, no conflict, nothing superseded. |
+| Structured responses | **N/A for REST** | REST already returns raw JSON dicts. MCP-side only; arrived with merge. |
 | Someday project filtering | **Already upstream** | Shared history, not a local change. A fresh clone of hald has it. |
 | Recurrence creation (#42), standalone headings (#10) | **Not possible** | Upstream documented these as Things API limits: `repetition rule` is read-only, and headings can only be created in a project's initial `create`. Don't re-investigate. |
