@@ -107,11 +107,15 @@ decision, finish the sync, and do it deliberately afterwards.
 
 Tag the currently-pinned commit **before** anything moves. Force-pushing leaves
 the old SHA on no branch, and `pyproject.toml` may still need to roll back to
-it — a dangling commit is eligible for garbage collection:
+it — a dangling commit is eligible for garbage collection. Tag the SHA that
+`pyproject.toml` actually pins — not HEAD, which only matches it by coincidence —
+and push only that tag (`--tags -f` would force-push every tag on the fork,
+including upstream's version tags):
 
 ```bash
+PIN=$(grep -oE 'things\.py@[0-9a-f]{40}' ~/mac-agents/things-mcp-wired/pyproject.toml | cut -d@ -f2)
 cd ~/mac-agents/things.py
-git tag -f "pinned/$(git rev-parse --short HEAD)" HEAD && git push -f origin --tags
+git tag -f "pinned/${PIN:0:7}" "$PIN" && git push -f origin "refs/tags/pinned/${PIN:0:7}"
 ```
 
 Then sync, as a single `&&` chain so a failure actually stops the sequence:
@@ -204,6 +208,17 @@ If it changed, update all three together or they drift apart:
 
 Grep for the old short SHA afterwards to catch any reference missed:
 `grep -rn "<old-short-sha>" patches/ README.md pyproject.toml`
+
+**Then commit the re-pin on `wired` before moving to step 5.** Step 5 starts
+with `git checkout master`, and a dirty `pyproject.toml` — which differs
+between the branches — makes git refuse the checkout, killing the chain at its
+first link:
+
+```bash
+git add pyproject.toml patches/ && git commit -m "Re-pin things-py to <new-short-sha>"
+```
+
+(`uv.lock` catches up in step 6; it gets committed with the sync commit.)
 
 ### 5. Merge upstream into `wired`
 
