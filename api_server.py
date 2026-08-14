@@ -1,9 +1,11 @@
 """Thin wrapper: mounts the Things MCP server + simple REST routes on one port."""
 
 import os
+import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta
 
 # Add things-mcp source to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
@@ -157,14 +159,55 @@ def nudge_things():
         pass
 
 
+_SINCE_UNITS = {"d": 1, "w": 7, "m": 30, "y": 365}
+
+
+def since_cutoff(since):
+    """Convert a relative offset ('1w', '26w', '7d') to a cutoff datetime.
+
+    Returns None if the string isn't a recognised offset.
+    """
+    match = re.fullmatch(r"(\d+)([dwmy])", since.strip().lower())
+    if not match:
+        return None
+    count, unit = int(match.group(1)), match.group(2)
+    return datetime.now() - timedelta(days=count * _SINCE_UNITS[unit])
+
+
+def completed_since(cutoff):
+    """Completed tasks whose COMPLETION date falls within the window.
+
+    Deliberately does not use things.completed(last=...): that filters on
+    TASK.creationDate, so a to-do created three weeks ago and checked off
+    yesterday is absent from a ?since=1w query. Roughly a third of the
+    completed to-dos in this database span a week or more between creation
+    and completion, and the weekly report is exactly the case where that
+    matters. Filter on stop_date instead, which is when it was actually done.
+    """
+    results = []
+    for task in things.completed() or []:
+        stop = task.get("stop_date")
+        if not stop:
+            continue
+        try:
+            stopped = datetime.fromisoformat(str(stop).split(".")[0])
+        except ValueError:
+            continue
+        if stopped >= cutoff:
+            results.append(task)
+    return results
+
+
 async def api_ssnc_completed(request: Request):
     since = request.query_params.get("since")
     if not since:
-        return JSONResponse({"error": "since parameter required (e.g. ?since=7d or ?since=2026-03-20)"}, status_code=400)
+        return JSONResponse({"error": "since parameter required (e.g. ?since=7d or ?since=1w)"}, status_code=400)
+    cutoff = since_cutoff(since)
+    if cutoff is None:
+        return JSONResponse({"error": f"invalid since value {since!r}; expected a count and unit like 7d, 1w, 3m or 1y"}, status_code=400)
     nudge_things()
-    completed = things.completed(last=since) or []
     results = []
-    for todo in completed:
+    for todo in completed_since(cutoff):
         project_title = todo.get("project_title", "") or ""
         if project_title.startswith("SSNC"):
             results.append(todo)

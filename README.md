@@ -297,13 +297,25 @@ them.**
 GET /api/ssnc/completed?since=26w
 ```
 
-- `since` is required and passed through to `things.completed(last=...)`;
-  accepts Things' relative forms (`1w`, `26w`, `7d`).
+- `since` is required and takes a count plus a unit — `7d`, `1w`, `26w`, `3m`,
+  `1y`. An unparseable value returns 400 rather than a 500.
+- The window is measured against each to-do's **completion** date (`stop_date`),
+  i.e. when it was actually finished. See the warning below.
 - Returns a bare JSON array of completed to-do objects, consumed directly.
 - Filters to to-dos whose `project_title` starts with `SSNC` — a prefix match,
   not an exact project name.
 - An empty array means nothing was logged in that window. It is a normal
   result, not an error.
+
+**Do not "simplify" this back to `things.completed(last=since)`.** That looks
+like the obvious implementation and is wrong: `last=` filters on
+`TASK.creationDate`, not completion date. A to-do created three weeks ago and
+checked off yesterday is then absent from a `?since=1w` query — silently, with
+no error, indistinguishable from an empty week. About a third of the completed
+to-dos in this database span a week or more between creation and completion,
+and a weekly report is precisely the case where that matters. `completed_since()`
+filters on `stop_date` for this reason. Upstream hit the same bug in
+`get_logbook` and fixed it the same way (hald/things-mcp#46).
 
 ### Required patch to things.py
 
