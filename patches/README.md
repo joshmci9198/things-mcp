@@ -34,15 +34,15 @@ silently empty.
 ### Where it lives
 
 Committed to the fork at `git@github.com:joshmci9198/things.py.git`, branch
-`heading-project-area-fallback`, as commit `a8004a2`. Applies on top of
-upstream `e67fe48`.
+`heading-project-area-fallback`, as commit `ef5e505`. Applies on top of
+upstream `1f679a6`.
 
 `pyproject.toml` consumes it as a pinned git reference, so a fresh clone gets
 the patch automatically — no manual step, nothing to forget:
 
 ```toml
 dependencies = [
-    "things-py @ git+https://github.com/joshmci9198/things.py@a8004a269a1ebbdfb94cc23fdb1426b3284fcde3",
+    "things-py @ git+https://github.com/joshmci9198/things.py@ef5e505aa759e9388e6983571694304462494a97",
 ]
 ```
 
@@ -62,7 +62,7 @@ change is and a fallback if the fork ever becomes unavailable.
 
 ```bash
 git clone https://github.com/thingsapi/things.py ../things.py
-cd ../things.py && git checkout e67fe48
+cd ../things.py && git checkout 1f679a6
 git apply ../things-mcp-wired/patches/0001-things-py-heading-project-area-fallback.patch
 ```
 

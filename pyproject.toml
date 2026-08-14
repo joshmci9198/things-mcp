@@ -24,7 +24,7 @@ dependencies = [
     # project/area on to-dos filed under a heading, which makes
     # /api/ssnc/completed silently return []. See patches/README.md.
     # Pin a full SHA, never a branch.
-    "things-py @ git+https://github.com/joshmci9198/things.py@a8004a269a1ebbdfb94cc23fdb1426b3284fcde3",
+    "things-py @ git+https://github.com/joshmci9198/things.py@ef5e505aa759e9388e6983571694304462494a97",
 ]
 
 [project.optional-dependencies]
