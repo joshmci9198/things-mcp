@@ -43,11 +43,17 @@ a **full SHA** on the fork. Changing `things.py` means re-pinning here.
 ```bash
 cd ~/mac-agents/things-mcp-wired
 git status --short && git -C ../things.py status --short   # both must be clean
-curl -s 'http://localhost:3400/api/ssnc/completed?since=26w' > /tmp/baseline.json
+curl -s -m 10 http://localhost:3400/api/health || echo "SERVICE DOWN"
+curl -s -m 60 'http://localhost:3400/api/ssnc/completed?since=26w' > /tmp/baseline.json
 python3 -c "import json;d=json.load(open('/tmp/baseline.json'));print(len(d),'items')"
 ```
 
 Record the count. If the tree is dirty, stop and ask — do not stash silently.
+
+**If the service is already down or the baseline fails to parse, stop.** Without
+a known-good baseline there is nothing to compare against afterwards, and a sync
+would turn a pre-existing failure into one that looks caused by the update. Fix
+or diagnose first, then start over.
 
 ### 2. Fetch and report before changing anything
 
@@ -63,6 +69,11 @@ deployment actually uses, before proceeding. Reads go through `things.py`
 (SQLite); writes go through `url_scheme.py` (Things URL scheme); v0.8.1+ adds a
 third path, AppleScript, for area tools.
 
+**If both repos report zero new commits, stop and say so.** Do not proceed to
+re-pin, `uv sync`, or restart — bouncing a healthy four-month-uptime service to
+apply nothing is pure risk. Each repo is independent: it is normal for one to
+have updates and the other none, so sync only the one that moved.
+
 ### 3. things.py first — it feeds the pin
 
 ```bash
@@ -71,6 +82,12 @@ git checkout main && git merge --ff-only upstream/main && git push origin main
 git checkout heading-project-area-fallback
 git rebase main
 ```
+
+If `--ff-only` fails, the mirror has picked up a local commit and is no longer a
+mirror. Do not resolve it with a merge — inspect with
+`git log upstream/main..main`, and once you know what the stray commit is,
+either move it onto the work branch or reset the mirror with
+`git reset --hard upstream/main`. Ask before discarding anything.
 
 Rebase, don't merge — keeps the patch a single clean commit on top of upstream
 and stays PR-ready for `thingsapi/things.py`.
@@ -84,7 +101,10 @@ keeping *both* upstream's changes and these fallbacks:
 - the joins `AREA_OF_PROJECT` and `AREA_OF_PROJECT_OF_HEADING`
 
 Direct links must keep precedence — only `NULL`s get populated. Verify before
-moving on:
+moving on. Run this **from `~/mac-agents/things.py`** with bare `python3`: the
+current directory puts the rebased *working tree* on `sys.path`, which is what
+needs testing here. Using the venv python would test the old installed copy and
+pass while the rebase is broken.
 
 ```bash
 python3 -c "
@@ -120,9 +140,16 @@ false failure on a perfectly intact patch.
 Only if the SHA changed. Update all three together or they drift apart:
 
 1. `pyproject.toml` — the full SHA in `things-py @ git+https://...@<sha>`
-2. `patches/0001-things-py-heading-project-area-fallback.patch` — regenerate:
-   `git -C ../things.py format-patch -1 heading-project-area-fallback --stdout > patches/0001-*.patch`
+2. the vendored patch — regenerate (literal filename, no glob: the shell cannot
+   expand a wildcard for a redirect target that is being rewritten):
+   ```bash
+   git -C ../things.py format-patch -1 heading-project-area-fallback --stdout \
+     > patches/0001-things-py-heading-project-area-fallback.patch
+   ```
 3. `patches/README.md` — the short SHA in "Where it lives"
+
+Grep for the old short SHA afterwards to catch any reference missed:
+`grep -rn "<old-short-sha>" patches/ README.md pyproject.toml`
 
 ### 5. Merge upstream into `wired`
 
@@ -159,8 +186,8 @@ editable local source came back and reproducibility is gone.
 ### 7. Verify — the step that catches silent breakage
 
 ```bash
-sleep 5
-curl -s http://localhost:3400/api/health
+for i in $(seq 1 10); do sleep 2; curl -s -m 4 http://localhost:3400/api/health >/dev/null && break; done
+curl -s -m 10 http://localhost:3400/api/health
 curl -s 'http://localhost:3400/api/ssnc/completed?since=26w' | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
@@ -192,11 +219,26 @@ than assuming, since a project with no area is legitimate.
 `?since=1w` returning `[]` is **correct** when nothing was completed recently.
 Never treat it as a failed sync; check `26w` to tell "quiet week" from "broken".
 
-Then commit and push:
+Then commit and push. Always pass a message — a bare `git commit` opens an
+editor and hangs:
 
 ```bash
-git add -A && git commit && git push origin wired
+git add -A
+git commit -F - <<'MSG'
+Sync upstream <version> into wired
+
+<what upstream changed, and which parts this deployment actually uses>
+
+Re-pinned things-py to <sha>. Verified after restart: ?since=26w returns
+<n> SSNC to-dos with project_title and area_title resolved, including
+heading-filed ones; ?since=1w returns [].
+MSG
+git push origin wired
 ```
+
+Note the `?since=26w` curl takes a few seconds — it calls `nudge_things()`,
+which switches focus to Finder and back to force Things to flush. Use a
+generous `-m` timeout; it is not hung.
 
 ### 8. If verification fails
 
