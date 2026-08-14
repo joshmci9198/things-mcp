@@ -37,18 +37,26 @@ Committed to the fork at `git@github.com:joshmci9198/things.py.git`, branch
 `heading-project-area-fallback`, as commit `a8004a2`. Applies on top of
 upstream `e67fe48`.
 
-`pyproject.toml` currently consumes it via an editable local path
-(`../things.py`) under `[tool.uv.sources]`, which means **a fresh clone does not
-get this patch automatically.** Either apply the patch by hand (below) or, once
-the branch is pushed, replace the editable source with a pinned SHA:
+`pyproject.toml` consumes it as a pinned git reference, so a fresh clone gets
+the patch automatically — no manual step, nothing to forget:
 
 ```toml
 dependencies = [
-    "things-py @ git+https://github.com/joshmci9198/things.py@<full-sha>",
+    "things-py @ git+https://github.com/joshmci9198/things.py@a8004a269a1ebbdfb94cc23fdb1426b3284fcde3",
 ]
 ```
 
-Pin a full SHA, not a branch.
+This is a full SHA on purpose. A branch name would let the dependency change
+under the service without anything in this repo changing — exactly the silent
+drift this patch exists to prevent. `[tool.hatch.metadata] allow-direct-references`
+is set because hatchling rejects direct references otherwise.
+
+**Changing `things.py` now takes a commit, not an edit.** Editing a local
+`../things.py` checkout no longer affects this service. To change it: commit and
+push to the fork, then update the SHA above and re-run `uv sync`.
+
+The `.patch` file beside this README is kept as a readable record of what the
+change is and a fallback if the fork ever becomes unavailable.
 
 ### Applying by hand
 
