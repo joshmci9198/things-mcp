@@ -17,3 +17,7 @@ wheels/
 *.dxt
 
 .DS_Store
+
+# launchd service logs
+stdout.log
+stderr.log

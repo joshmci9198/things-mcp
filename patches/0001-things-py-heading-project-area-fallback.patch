@@ -1,0 +1,75 @@
+From a8004a269a1ebbdfb94cc23fdb1426b3284fcde3 Mon Sep 17 00:00:00 2001
+From: joshmci9198 <21321188+joshmci9198@users.noreply.github.com>
+Date: Thu, 13 Aug 2026 21:05:17 -0700
+Subject: [PATCH] Resolve project and area for tasks filed under headings
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+make_tasks_sql_query() only resolved project/area when the task was
+linked directly to a PROJECT or AREA row. A task filed under a heading
+links to the heading, not the project, so project, project_title, area
+and area_title all came back NULL for it — even though the heading
+itself belongs to a project, and that project to an area.
+
+The query already LEFT JOINed PROJECT_OF_HEADING but never read from it.
+Add the missing fallbacks:
+
+  project/project_title  -> via PROJECT_OF_HEADING
+  area/area_title        -> via PROJECT.area, and via
+                            PROJECT_OF_HEADING.area
+
+with two new joins (AREA_OF_PROJECT, AREA_OF_PROJECT_OF_HEADING) to
+reach the area rows. Direct links still take precedence, so existing
+results are unchanged; only rows that were NULL become populated.
+
+This is load-bearing downstream: consumers that group or filter
+completed todos by project_title silently match nothing for
+heading-filed tasks, which is indistinguishable from "nothing was
+logged".
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ things/database.py | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/things/database.py b/things/database.py
+index fd7071b..108567e 100755
+--- a/things/database.py
++++ b/things/database.py
+@@ -554,15 +554,21 @@ def make_tasks_sql_query(where_predicate=None, order_predicate=None):
+                 END AS status,
+                 CASE
+                     WHEN AREA.uuid IS NOT NULL THEN AREA.uuid
++                    WHEN AREA_OF_PROJECT.uuid IS NOT NULL THEN AREA_OF_PROJECT.uuid
++                    WHEN AREA_OF_PROJECT_OF_HEADING.uuid IS NOT NULL THEN AREA_OF_PROJECT_OF_HEADING.uuid
+                 END AS area,
+                 CASE
+                     WHEN AREA.uuid IS NOT NULL THEN AREA.title
++                    WHEN AREA_OF_PROJECT.uuid IS NOT NULL THEN AREA_OF_PROJECT.title
++                    WHEN AREA_OF_PROJECT_OF_HEADING.uuid IS NOT NULL THEN AREA_OF_PROJECT_OF_HEADING.title
+                 END AS area_title,
+                 CASE
+                     WHEN PROJECT.uuid IS NOT NULL THEN PROJECT.uuid
++                    WHEN PROJECT_OF_HEADING.uuid IS NOT NULL THEN PROJECT_OF_HEADING.uuid
+                 END AS project,
+                 CASE
+                     WHEN PROJECT.uuid IS NOT NULL THEN PROJECT.title
++                    WHEN PROJECT_OF_HEADING.uuid IS NOT NULL THEN PROJECT_OF_HEADING.title
+                 END AS project_title,
+                 CASE
+                     WHEN HEADING.uuid IS NOT NULL THEN HEADING.uuid
+@@ -601,6 +607,10 @@ def make_tasks_sql_query(where_predicate=None, order_predicate=None):
+             LEFT OUTER JOIN
+                 {TABLE_TASK} PROJECT_OF_HEADING
+                 ON HEADING.project = PROJECT_OF_HEADING.uuid
++            LEFT OUTER JOIN
++                {TABLE_AREA} AREA_OF_PROJECT ON PROJECT.area = AREA_OF_PROJECT.uuid
++            LEFT OUTER JOIN
++                {TABLE_AREA} AREA_OF_PROJECT_OF_HEADING ON PROJECT_OF_HEADING.area = AREA_OF_PROJECT_OF_HEADING.uuid
+             LEFT OUTER JOIN
+                 {TABLE_TASKTAG} TAGS ON TASK.uuid = TAGS.tasks
+             LEFT OUTER JOIN
+-- 
+2.37.1 (Apple Git-137.1)
+

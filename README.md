@@ -253,3 +253,65 @@ THINGS_MCP_TRANSPORT=http THINGS_MCP_HOST=0.0.0.0 THINGS_MCP_PORT=8000 uv run th
 ```
 
 See `.env.example` for a sample configuration file.
+
+## Wired Deployment (this fork)
+
+`api_server.py` serves the MCP protocol *and* a plain REST API from a single
+port, so consumers that don't speak MCP can still read and write Things:
+
+| Path | Purpose |
+|------|---------|
+| `/mcp` | FastMCP server, mounted for Claude and other agents |
+| `/api/*` | REST routes for automations (list views, search, add, update) |
+
+`start.sh` binds it to the Mac's Tailscale IP (port 3400 by default) so it is
+reachable across the tailnet. It runs under launchd via
+`~/Library/LaunchAgents/com.obsidian-sync.things-mcp.plist` with `KeepAlive`
+and `RunAtLoad`, logging to `stdout.log` / `stderr.log` in this directory.
+
+To restart after changing `api_server.py` or `start.sh`:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.obsidian-sync.things-mcp
+```
+
+### Why `nudge_things()` exists
+
+**Do not delete this.** Things 3 buffers writes and does not flush them to its
+SQLite database until the app changes focus. Reading the database without a
+focus change returns stale data — recently completed to-dos simply won't be
+there. `nudge_things()` forces the flush by switching to Finder and back to
+Things before a read.
+
+The cost is that it steals focus on the Mac for a couple of seconds. That is
+the trade: a visible focus flicker, or silently stale reads. It is only wired
+into `/api/ssnc/completed`, which is called weekly.
+
+### `/api/ssnc/completed` contract
+
+Consumed over the tailnet by automation-backend on a weekly schedule. **The
+response shape and the `since` parameter are a stable contract — don't change
+them.**
+
+```
+GET /api/ssnc/completed?since=26w
+```
+
+- `since` is required and passed through to `things.completed(last=...)`;
+  accepts Things' relative forms (`1w`, `26w`, `7d`).
+- Returns a bare JSON array of completed to-do objects, consumed directly.
+- Filters to to-dos whose `project_title` starts with `SSNC` — a prefix match,
+  not an exact project name.
+- An empty array means nothing was logged in that window. It is a normal
+  result, not an error.
+
+### Required patch to things.py
+
+This deployment depends on a patch to `things.py` that resolves
+`project`/`project_title` and `area`/`area_title` for to-dos filed under a
+**heading**. Upstream returns `NULL` for those fields in that case, because the
+task row links to the heading rather than to the project.
+
+Without the patch, `/api/ssnc/completed` matches nothing for any heading-filed
+to-do and returns `[]` — which is indistinguishable from "nothing was logged"
+at every layer downstream. The failure is silent. See `patches/README.md`.

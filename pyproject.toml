@@ -20,7 +20,7 @@ classifiers = [
 dependencies = [
     "httpx>=0.28.1",
     "fastmcp>=2.0.0",
-    "things-py>=0.0.15",
+    "things-py",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +44,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/things_mcp"]
+
+# things-py is consumed from a local checkout carrying a required patch that
+# resolves project/area for to-dos filed under a heading. Without it
+# /api/ssnc/completed silently returns []. See patches/README.md.
+# A fresh clone does NOT get the patch from this path — replace with a pinned
+# SHA once the fork branch is pushed.
+[tool.uv.sources]
+things-py = { path = "../things.py", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
