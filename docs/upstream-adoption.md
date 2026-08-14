@@ -24,6 +24,27 @@ free after a merge and never appears on `/api/*`. Nothing errors; the endpoint
 just doesn't exist. Every new upstream tool is therefore a decision, not an
 automatic win.
 
+## Current write surface
+
+Neither surface is read-only; they are symmetric, four writes each.
+
+| | Reads | Writes |
+|---|---|---|
+| `/mcp` | 18 tools | `add_todo`, `add_project`, `update_todo`, `update_project` |
+| `/api/*` | 13 routes | `/api/add/todo`, `/api/add/project`, `/api/update/todo`, `/api/update/project` |
+
+What *is* read-only is **`things.py`** itself — the library only reads SQLite and
+cannot write to Things at all. Every write leaves through the Things URL scheme
+instead. That asymmetry is why `nudge_things()` is needed: writes go through the
+app, reads go around it.
+
+**Nothing in this deployment can delete anything.** Verified across our MCP
+tools, our REST routes, `url_scheme.py`, and upstream v0.8.1: zero
+delete/trash/remove operations. The closest is `update_todo(completed=…)` or
+`canceled=…`, which changes state and is undoable in Things. Treat that as a
+property worth preserving — adopting anything destructive should be a deliberate
+decision recorded here, not something acquired by merge.
+
 ## Triage questions
 
 For each upstream change, ask in order:

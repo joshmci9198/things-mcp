@@ -42,13 +42,20 @@ a **full SHA** on the fork. Changing `things.py` means re-pinning here.
 
 ```bash
 cd ~/mac-agents/things-mcp-wired
-git status --short && git -C ../things.py status --short   # both must be clean
+# git status exits 0 whether clean or dirty, so test the output, not the code
+for r in . ../things.py; do
+  [ -z "$(git -C $r status --porcelain)" ] && echo "clean: $r" || { echo "DIRTY: $r"; git -C $r status --short; }
+done
 curl -s -m 10 http://localhost:3400/api/health || echo "SERVICE DOWN"
 curl -s -m 60 'http://localhost:3400/api/ssnc/completed?since=26w' > /tmp/baseline.json
 python3 -c "import json;d=json.load(open('/tmp/baseline.json'));print(len(d),'items')"
+git rev-parse HEAD > /tmp/rollback-wired.sha
+git -C ../things.py rev-parse HEAD > /tmp/rollback-thingspy.sha
 ```
 
-Record the count. If the tree is dirty, stop and ask — do not stash silently.
+Record the count. If either repo reports `DIRTY`, stop and ask — do not stash
+silently. The two recorded SHAs are the rollback targets for step 8; capture
+them before anything moves.
 
 **If the service is already down or the baseline fails to parse, stop.** Without
 a known-good baseline there is nothing to compare against afterwards, and a sync
@@ -98,18 +105,35 @@ decision, finish the sync, and do it deliberately afterwards.
 
 ### 3. things.py first — it feeds the pin
 
+Tag the currently-pinned commit **before** anything moves. Force-pushing leaves
+the old SHA on no branch, and `pyproject.toml` may still need to roll back to
+it — a dangling commit is eligible for garbage collection:
+
 ```bash
 cd ~/mac-agents/things.py
-git checkout main && git merge --ff-only upstream/main && git push origin main
-git checkout heading-project-area-fallback
-git rebase main
+git tag -f "pinned/$(git rev-parse --short HEAD)" HEAD && git push -f origin --tags
 ```
+
+Then sync, as a single `&&` chain so a failure actually stops the sequence:
+
+```bash
+git checkout main && git merge --ff-only upstream/main && git push origin main \
+  && git checkout heading-project-area-fallback && git rebase main
+```
+
+**The chain matters.** Written as separate lines, a failed `--ff-only` does not
+stop the next line — you would rebase onto a stale mirror and it would look like
+success.
 
 If `--ff-only` fails, the mirror has picked up a local commit and is no longer a
 mirror. Do not resolve it with a merge — inspect with
 `git log upstream/main..main`, and once you know what the stray commit is,
 either move it onto the work branch or reset the mirror with
 `git reset --hard upstream/main`. Ask before discarding anything.
+
+If the rebase stops on a conflict and you cannot resolve it confidently,
+`git rebase --abort` returns the branch exactly as it was. Do that rather than
+guessing at SQL you don't understand.
 
 Rebase, don't merge — keeps the patch a single clean commit on top of upstream
 and stays PR-ready for `thingsapi/things.py`.
@@ -159,7 +183,15 @@ false failure on a perfectly intact patch.
 
 ### 4. Re-pin in things-mcp-wired
 
-Only if the SHA changed. Update all three together or they drift apart:
+Only if the SHA actually changed — compare, don't assume:
+
+```bash
+OLD=$(grep -oE 'things\.py@[0-9a-f]{40}' pyproject.toml | cut -d@ -f2)
+NEW=$(git -C ../things.py rev-parse heading-project-area-fallback)
+[ "$OLD" = "$NEW" ] && echo "unchanged — skip step 4" || echo "re-pin: ${OLD:0:7} -> ${NEW:0:7}"
+```
+
+If it changed, update all three together or they drift apart:
 
 1. `pyproject.toml` — the full SHA in `things-py @ git+https://...@<sha>`
 2. the vendored patch — regenerate (literal filename, no glob: the shell cannot
@@ -175,10 +207,13 @@ Grep for the old short SHA afterwards to catch any reference missed:
 
 ### 5. Merge upstream into `wired`
 
+One `&&` chain, for the same reason as step 3 — a failed `--ff-only` must not
+fall through into merging a stale mirror:
+
 ```bash
 cd ~/mac-agents/things-mcp-wired
-git checkout master && git merge --ff-only upstream/master && git push origin master
-git checkout wired && git merge master
+git checkout master && git merge --ff-only upstream/master && git push origin master \
+  && git checkout wired && git merge master
 ```
 
 Merge here, don't rebase — `wired` is a long-lived deployment branch and its
@@ -196,21 +231,39 @@ major version actually being tested.
 ### 6. Install and restart
 
 ```bash
-~/.local/bin/uv sync
+~/.local/bin/uv sync --extra test
 .venv/bin/python -c "import things,os;p=os.path.dirname(things.__file__);print(p);print('patch present:', 'AREA_OF_PROJECT' in open(p+'/database.py').read())"
+~/.local/bin/uv run pytest -q
+```
+
+Use `--extra test`; a bare `uv sync` prunes the test dependencies, and then
+pytest cannot run at all.
+
+Two gates before restarting, both cheap:
+
+1. **`patch present: True`.** The path must be inside `.venv/lib/.../site-packages`,
+   not `mac-agents/things.py` — the latter means the editable local source came
+   back and reproducibility is gone.
+2. **The full suite passes.** 121 tests, ~2 seconds. They cover `url_scheme`,
+   `formatters`, and the server tools — exactly what an upstream merge touches.
+   This is the cheapest signal available and it runs *before* the live service is
+   restarted, so a broken merge never reaches the tailnet.
+
+Only then restart:
+
+```bash
 launchctl kickstart -k gui/$(id -u)/com.obsidian-sync.things-mcp
 ```
 
-Confirm `patch present: True` **before** restarting. The path must be inside
-`.venv/lib/.../site-packages`, not `mac-agents/things.py` — the latter means the
-editable local source came back and reproducibility is gone.
+If tests fail, do not restart. The running service is still on the old code and
+is still correct — that is the safe state to debug from.
 
 ### 7. Verify — the step that catches silent breakage
 
 ```bash
 for i in $(seq 1 10); do sleep 2; curl -s -m 4 http://localhost:3400/api/health >/dev/null && break; done
 curl -s -m 10 http://localhost:3400/api/health
-curl -s 'http://localhost:3400/api/ssnc/completed?since=26w' | python3 -c "
+curl -s -m 60 'http://localhost:3400/api/ssnc/completed?since=26w' | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 base=json.load(open('/tmp/baseline.json'))
@@ -264,13 +317,32 @@ generous `-m` timeout; it is not hung.
 
 ### 8. If verification fails
 
-Nothing here is irreversible — the pin makes the old state exactly recoverable.
+Nothing here is irreversible, but **both** repos may need rolling back — step 3
+force-pushes `things.py` before the verification that decides. Use the SHAs
+recorded in step 1.
 
 ```bash
-git checkout wired && git reset --hard origin/wired   # pre-merge state
-~/.local/bin/uv sync                                   # restores the old pinned SHA
+cd ~/mac-agents/things-mcp-wired
+git checkout wired && git reset --hard "$(cat /tmp/rollback-wired.sha)"
+~/.local/bin/uv sync --extra test        # restores the previously pinned things-py
 launchctl kickstart -k gui/$(id -u)/com.obsidian-sync.things-mcp
 ```
+
+That restores the service. If `things.py` also needs reverting:
+
+```bash
+cd ~/mac-agents/things.py
+git checkout heading-project-area-fallback
+git reset --hard "$(cat /tmp/rollback-thingspy.sha)"
+git push --force-with-lease origin heading-project-area-fallback
+```
+
+**Why step 3 tags before force-pushing:** once the branch moves, the old commit
+is on no branch. GitHub keeps such commits fetchable for a while, but they are
+unreferenced and eligible for garbage collection — and `pyproject.toml` may
+still be pinned to one. The `pinned/<sha>` tags keep every SHA that was ever
+pinned permanently reachable. If a rollback ever reports a missing object, that
+is the tag that saves it.
 
 Re-verify with step 7, then report what failed rather than retrying blindly.
 
