@@ -74,6 +74,28 @@ re-pin, `uv sync`, or restart — bouncing a healthy four-month-uptime service t
 apply nothing is pure risk. Each repo is independent: it is normal for one to
 have updates and the other none, so sync only the one that moved.
 
+### 2.5 Triage the changelog — decide what to adopt
+
+**Do this before merging, and do not skip it because the merge is clean.** A
+clean merge only means nothing broke; it says nothing about what was gained or
+missed.
+
+New MCP tools land on `/mcp` automatically and reach `/api/*` **never** — the
+REST routes are hand-written in `api_server.py` and bypass `server.py` entirely.
+So every new upstream tool is a decision. Read `docs/upstream-adoption.md` for
+the propagation table, the triage questions, and what has already been decided,
+then:
+
+1. Classify each changelog entry against that table.
+2. Present the ones that are genuinely a choice to the user — with a
+   recommendation, not an exhaustive list. Skip anything already settled in the
+   log; that is what the log is for.
+3. **Record the outcome in `docs/upstream-adoption.md`, including declines.**
+   An undocumented "no" gets re-asked every sync.
+
+Adopting a tool into REST is separate work, not part of the sync. Note it as a
+decision, finish the sync, and do it deliberately afterwards.
+
 ### 3. things.py first — it feeds the pin
 
 ```bash
