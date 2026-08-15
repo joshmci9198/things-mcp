@@ -336,6 +336,65 @@ To restart after changing `api_server.py` or `start.sh`:
 launchctl kickstart -k gui/$(id -u)/com.obsidian-sync.things-mcp
 ```
 
+### Host hardening (files outside this repo)
+
+Three system files are part of this deployment but are not in git. They are
+listed here because every one of them has already been forgotten or
+mis-debugged at least once.
+
+| File | Purpose |
+|------|---------|
+| `/etc/pf.anchors/tailscale-ssh` | pf rules: ports 22 and 3400 reachable from the tailnet only |
+| `/Library/LaunchDaemons/com.obsidian-sync.pf-enable.plist` | enables pf at boot |
+| `/etc/ssh/sshd_config.d/99-hardening.conf` | key-only SSH, no root login |
+| `/etc/newsyslog.d/things-mcp.conf` | caps `stdout.log` / `stderr.log` / `pf-enable.log` |
+
+**pf is not enabled at boot by macOS.** Apple's
+`/System/Library/LaunchDaemons/com.apple.pfctl.plist` runs `pfctl -f
+/etc/pf.conf`, which *loads* the ruleset but never enables it — there is no
+`-e`. `pfctl -e` is runtime-only state and does not survive a reboot, so rules
+sit parsed and inert after every restart. That is what
+`com.obsidian-sync.pf-enable.plist` exists to fix; Apple's plist is on the
+sealed read-only system volume and cannot be edited. Verify with `pfctl -si`
+after a reboot, not after a manual `pfctl -e`.
+
+**`pass quick on lo0 all` must stay the first rule in the anchor.** macOS
+`/etc/pf.conf` has no `set skip on lo0`, so pf filters loopback like any other
+interface, and the `block ... port 3400` rule would otherwise drop
+`127.0.0.1:3400` — killing the API outright, since uvicorn binds loopback and
+`tailscale serve` reaches it over loopback. `set skip` is only valid in the main
+ruleset, not inside an anchor, hence the `quick` pass. Without `quick`, pf's
+last-match-wins evaluation would let the later `block` override it.
+
+**SSH is tailnet-only; there is no LAN fallback.** If Tailscale is down on this
+Mac, recovery requires physical console access. This is deliberate — re-add
+`pass in on en0 proto tcp from 192.168.0.0/24 to any port 22` to trade some
+exposure for a remote escape hatch.
+
+**`ListenAddress` in `sshd_config` does nothing on macOS.** sshd is socket-
+activated by launchd (`ssh.plist`, `inetdCompatibility`), so launchd owns the
+listening socket and sshd never consults `ListenAddress`. Restricting which
+interfaces reach port 22 is a pf job. A stale `ListenAddress` pinned to an old
+Tailscale IP lived in the hardening file for months doing nothing, and would
+have broken SSH entirely had sshd ever run standalone.
+
+**pf fails open on a bad ruleset.** A syntax error in the anchor means no
+filtering at all, silently, at boot. Always dry-run before loading:
+
+```bash
+sudo pfctl -n -f /etc/pf.conf && sudo pfctl -f /etc/pf.conf
+sudo pfctl -a tailscale-ssh -sr
+```
+
+**You cannot test the LAN block from this Mac.** Traffic to its own LAN address
+routes over `lo0` (`route -n get 192.168.0.236` → `interface: lo0`) and matches
+the loopback pass rule. Test from another host on the LAN:
+`nc -z -w 4 192.168.0.236 22`.
+
+**Tailscale key expiry is disabled** for this node. Left enabled, the key
+expires roughly every 180 days and the node silently drops off the tailnet,
+taking serve and remote SSH with it.
+
 ### Why `nudge_things()` exists
 
 **Do not delete this.** Things 3 buffers writes and does not flush them to its
