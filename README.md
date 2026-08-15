@@ -301,8 +301,32 @@ port, so consumers that don't speak MCP can still read and write Things:
 | `/mcp` | FastMCP server, mounted for Claude and other agents |
 | `/api/*` | REST routes for automations (list views, search, add, update) |
 
-`start.sh` binds it to the Mac's Tailscale IP (port 3400 by default) so it is
-reachable across the tailnet. It runs under launchd via
+`start.sh` binds it to `127.0.0.1` (port 3400 by default). Tailnet reachability
+comes from `tailscale serve`, which terminates TLS and proxies to that loopback
+port:
+
+```bash
+tailscale serve --bg --https=3400 http://127.0.0.1:3400
+tailscale serve status   # verify — must not say "No serve config"
+```
+
+This exposes `https://<node>.<tailnet>.ts.net:3400` to the tailnet. The REST API
+has **no authentication**, so every device on the tailnet gets full read/write
+access to the Things database — keep the bind on loopback so the surface stops
+at the tailnet and never reaches the local LAN.
+
+**Requires Tailscale >= 1.102.** On the macOS `macsys` build at 1.98.2, serve
+silently no-ops: the CLI prints success, the daemon logs the
+`POST /localapi/v0/serve-config`, and the config is then discarded — nothing
+ever listens on the tailnet address. Always confirm with `serve status` rather
+than trusting the command's own output.
+
+Reference the node by its MagicDNS name (`mac-homeserver.tail1228bf.ts.net`),
+never by tailnet IP: a Tailscale update can re-register the Mac as a new node
+with a new IP. Keeping the Mac's `ComputerName`/`HostName`/`LocalHostName` set
+to `mac-homeserver` stops that re-registration from also losing the node's name.
+
+It runs under launchd via
 `~/Library/LaunchAgents/com.obsidian-sync.things-mcp.plist` with `KeepAlive`
 and `RunAtLoad`, logging to `stdout.log` / `stderr.log` in this directory.
 
