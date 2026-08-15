@@ -1,5 +1,7 @@
 """Thin wrapper: mounts the Things MCP server + simple REST routes on one port."""
 
+import hmac
+import json
 import os
 import re
 import subprocess
@@ -13,12 +15,80 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 import things
 import uvicorn
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route, Mount
 
 from things_mcp.server import mcp
 from things_mcp import url_scheme
+
+
+# --- Authentication ---
+
+# Everything except the paths below requires `Authorization: Bearer <token>`,
+# where the token comes from THINGS_MCP_TOKEN (start.sh loads it from .env,
+# which is gitignored). /mcp is covered too: it grants the same full read/write
+# access to the Things database as the REST routes do.
+#
+# There is deliberately no "no token configured means no auth" mode. This
+# server exposes an unauthenticated view of an entire personal task database,
+# and a silent insecure fallback is precisely how it previously ended up bound
+# to 0.0.0.0 and reachable from the whole LAN. Misconfiguration fails closed.
+PUBLIC_PATHS = frozenset({"/api/health"})
+
+
+def _expected_token():
+    return (os.environ.get("THINGS_MCP_TOKEN") or "").strip()
+
+
+class BearerAuthMiddleware:
+    """Reject requests without a valid bearer token.
+
+    Written as raw ASGI rather than BaseHTTPMiddleware because the MCP mount
+    streams responses (SSE), and BaseHTTPMiddleware buffers them.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path", "") in PUBLIC_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        expected = _expected_token()
+        if not expected:
+            await self._deny(send, 503, "server misconfigured: THINGS_MCP_TOKEN is not set")
+            return
+
+        presented = b""
+        for name, value in scope.get("headers", []):
+            if name == b"authorization":
+                presented = value
+                break
+
+        # Compared as bytes so a header with undecodable input cannot raise.
+        scheme, _, credential = presented.partition(b" ")
+        if scheme.lower() != b"bearer" or not hmac.compare_digest(
+            credential.strip(), expected.encode("utf-8")
+        ):
+            await self._deny(send, 401, "unauthorized")
+            return
+
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _deny(send, status, detail):
+        body = json.dumps({"error": detail}).encode("utf-8")
+        headers = [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode("ascii")),
+        ]
+        if status == 401:
+            headers.append((b"www-authenticate", b'Bearer realm="things-mcp"'))
+        await send({"type": "http.response.start", "status": status, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
 
 
 # --- REST routes ---
@@ -239,6 +309,7 @@ mcp_app = mcp.http_app(path="/")
 
 app = Starlette(
     lifespan=mcp_app.lifespan,
+    middleware=[Middleware(BearerAuthMiddleware)],
     routes=[
         # REST API endpoints (for automations)
         Route("/api/health", api_health),
@@ -264,6 +335,13 @@ app = Starlette(
 )
 
 if __name__ == "__main__":
+    if not _expected_token():
+        sys.exit(
+            "THINGS_MCP_TOKEN is not set, refusing to start.\n"
+            "Generate a token and store it outside version control:\n"
+            "  printf 'THINGS_MCP_TOKEN=%s\\n' \"$(openssl rand -hex 32)\" >> .env\n"
+            "start.sh loads .env automatically."
+        )
     host = os.environ.get("THINGS_MCP_HOST", "127.0.0.1")
     port = int(os.environ.get("THINGS_MCP_PORT", "3400"))
     uvicorn.run(app, host=host, port=port)

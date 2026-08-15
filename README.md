@@ -310,10 +310,39 @@ tailscale serve --bg --https=3400 http://127.0.0.1:3400
 tailscale serve status   # verify — must not say "No serve config"
 ```
 
-This exposes `https://<node>.<tailnet>.ts.net:3400` to the tailnet. The REST API
-has **no authentication**, so every device on the tailnet gets full read/write
-access to the Things database — keep the bind on loopback so the surface stops
-at the tailnet and never reaches the local LAN.
+This exposes `https://<node>.<tailnet>.ts.net:3400` to the tailnet. Keep the
+bind on loopback so the surface stops at the tailnet and never reaches the
+local LAN.
+
+### Authentication
+
+Every route except `/api/health` requires a bearer token, including `/mcp` —
+the MCP mount grants the same full read/write access to the Things database
+that the REST routes do. Without it, any device on the tailnet could read and
+modify the entire database.
+
+```bash
+printf 'THINGS_MCP_TOKEN=%s\n' "$(openssl rand -hex 32)" >> .env
+chmod 600 .env
+launchctl kickstart -k gui/$(id -u)/com.obsidian-sync.things-mcp
+```
+
+`.env` is gitignored; `start.sh` loads it before launching the server. The
+server **refuses to start** if `THINGS_MCP_TOKEN` is unset, and returns 503
+rather than serving data if it somehow reaches a request without one. That is
+deliberate — a silent insecure fallback is exactly how `start.sh` previously
+ended up binding `0.0.0.0` and exposing this database to the whole LAN.
+
+Callers pass it as a normal bearer credential:
+
+```bash
+curl -H "Authorization: Bearer $THINGS_MCP_TOKEN" \
+  https://mac-homeserver.tail1228bf.ts.net:3400/api/today
+```
+
+MCP clients need the same header in their HTTP transport config. Anything that
+consumed this API before the token existed — automations on other tailnet
+hosts, shortcuts — will get 401 until updated.
 
 **Requires Tailscale >= 1.102.** On the macOS `macsys` build at 1.98.2, serve
 silently no-ops: the CLI prints success, the daemon logs the

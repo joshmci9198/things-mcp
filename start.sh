@@ -4,6 +4,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Load THINGS_MCP_TOKEN (and any other overrides) from .env, which is
+# gitignored so the token never reaches the repo. api_server.py refuses to
+# start without it.
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  set -a
+  . "$SCRIPT_DIR/.env"
+  set +a
+fi
+
 # Bind loopback only. Tailnet reachability comes from `tailscale serve`, which
 # proxies https://<node>.<tailnet>.ts.net:3400 to 127.0.0.1:3400. Binding a
 # routable address here would also expose the API — which has no auth — to the
