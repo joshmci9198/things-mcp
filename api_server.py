@@ -4,7 +4,6 @@ import hmac
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -218,15 +217,39 @@ async def api_update_todo(request: Request):
     return JSONResponse({"ok": True, "id": todo_id})
 
 
+# Things writes GUI-originated changes (a to-do checked off by hand) to SQLite
+# on an internal timer, measured at ~8 s. Writes made via the URL scheme or
+# AppleScript land immediately and never needed help. Waiting longer than the
+# timer before reading closes the window where a just-finished to-do is
+# missing from the report.
+THINGS_FLUSH_WAIT_SECONDS = 10.0
+
+
 def nudge_things():
-    """Switch focus to force Things to flush DB."""
-    try:
-        subprocess.run(["open", "-a", "Finder"], timeout=3)
-        time.sleep(1)
-        subprocess.run(["open", "-a", "Things3"], timeout=3)
-        time.sleep(1)
-    except Exception:
-        pass
+    """Give Things time to flush pending GUI edits to SQLite before we read it.
+
+    History, because both previous versions of this function silently did
+    nothing on the homeserver and it took a day to notice:
+
+    * Focus switching (`open -a Finder` / `open -a Things3`) — a background
+      process cannot change the frontmost app while the screen is locked, and
+      the homeserver's screen is always locked. Returned success, did nothing.
+    * AppleScript (`osascript ... count to dos`) — the service runs under
+      launchd with /bin/bash as its responsible process, which has no TCC
+      Automation grant for Things and no desktop on which to ask for one. The
+      Apple event hung until it timed out (-1712), and killing the hung
+      osascript left Things unresponsive to events for a minute afterwards.
+
+    Neither the URL scheme nor AppleScript can stand in for a GUI edit when
+    testing this: both flush in under a second. Only a real click in the app
+    exercises the timer.
+
+    What actually made the timer reliable was opting Things out of App Nap
+    (`NSAppSleepDisabled`, see README → Host hardening); while napping and
+    occluded, the ~8 s flush stretched to minutes. With that set, waiting out
+    the interval is the whole job, and it needs no permissions and no focus.
+    """
+    time.sleep(THINGS_FLUSH_WAIT_SECONDS)
 
 
 _SINCE_UNITS = {"d": 1, "w": 7, "m": 30, "y": 365}

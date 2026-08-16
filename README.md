@@ -424,17 +424,49 @@ the loopback pass rule. Test from another host on the LAN:
 expires roughly every 180 days and the node silently drops off the tailnet,
 taking serve and remote SSH with it.
 
+**Things is opted out of App Nap.** Set on 2026-08-16 with
+
+```bash
+defaults write com.culturedcode.ThingsMac NSAppSleepDisabled -bool YES
+```
+
+and read back with `defaults read`. It lives in
+`~/Library/Preferences/com.culturedcode.ThingsMac.plist`, so it survives
+reboots and Things updates; Things only reads it at launch, so it takes effect
+after the next quit/reopen. See the next section for why.
+
 ### Why `nudge_things()` exists
 
-**Do not delete this.** Things 3 buffers writes and does not flush them to its
-SQLite database until the app changes focus. Reading the database without a
-focus change returns stale data — recently completed to-dos simply won't be
-there. `nudge_things()` forces the flush by switching to Finder and back to
-Things before a read.
+**Do not delete this.** `/api/ssnc/completed` reads the Things SQLite
+database directly, and GUI-originated changes — a to-do checked off by hand —
+only reach SQLite on Things' internal flush timer. Measured on 2026-08-16:
+about **8 seconds** with the screen unlocked and Things active, but somewhere
+between **4 and 8 minutes** with the screen locked. The difference is macOS
+App Nap throttling an occluded, non-active app's timers. Anything finished in
+that window is invisible to the report.
 
-The cost is that it steals focus on the Mac for a couple of seconds. That is
-the trade: a visible focus flicker, or silently stale reads. It is only wired
-into `/api/ssnc/completed`, which is called weekly.
+Two earlier implementations did nothing on this box, silently:
+
+- **Focus switching** (`open -a Finder` / `open -a Things3`). A background
+  process cannot change the frontmost app while the screen is locked, and the
+  homeserver's screen is locked essentially always. Verified by watching the
+  frontmost process stay `loginwindow` through the whole sequence.
+- **AppleScript** (`osascript -e 'tell application "Things3" to count ...'`).
+  Works from Terminal because Terminal holds a TCC Automation grant for
+  Things. The service runs under launchd with `/bin/bash` as its responsible
+  process, which has no such grant and no desktop on which to prompt for one,
+  so the Apple event hangs until it times out (`-1712`). Worse, killing the
+  hung `osascript` left Things unresponsive to *all* Apple events for 40–100 s
+  afterwards. Verified with a throwaway launchd job.
+
+The current implementation just waits `THINGS_FLUSH_WAIT_SECONDS` (10 s) —
+longer than the flush timer — before reading. That needs no permissions and no
+focus. It only works because App Nap is disabled (above); with Things napping
+the timer is not honoured and no amount of waiting is reliable.
+
+Testing note: neither the URL scheme nor AppleScript is a stand-in for a GUI
+edit. Both write to SQLite in under a second. Only a real click in the app
+exercises the timer, so measuring this requires someone at the keyboard.
 
 ### `/api/ssnc/completed` contract
 
