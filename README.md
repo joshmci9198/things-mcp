@@ -467,6 +467,18 @@ the timer is not honoured and no amount of waiting is reliable.
 Testing note: neither the URL scheme nor AppleScript is a stand-in for a GUI
 edit. Both write to SQLite in under a second. Only a real click in the app
 exercises the timer, so measuring this requires someone at the keyboard.
+Measured 2026-08-16 with App Nap off: a GUI delete on the homeserver reached
+SQLite in ~2 s.
+
+**Changes made on other devices are a separate, slower path.** They arrive
+via Things Cloud sync, which the locked homeserver picks up on its own
+schedule — measured at 5½ and 7–8½ minutes for two to-dos added on a laptop.
+`open -g -a Things3` was tested as a wake-up (it needs no TCC and works
+locked) and does *not* trigger a sync: nothing for 3 min hands-off, nothing
+for 90 s after the poke, then it landed on its own. There is no lever for
+this from the service without a TCC Automation grant, so the API simply lags
+remote-device edits by up to ~8 minutes. Irrelevant for a weekly report;
+worth knowing for anything near-real-time.
 
 ### `/api/ssnc/completed` contract
 
