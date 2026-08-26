@@ -96,6 +96,14 @@ async def api_health(request: Request):
     return JSONResponse({"ok": True})
 
 
+async def api_health_auth(request: Request):
+    # Same body as /api/health, but NOT in PUBLIC_PATHS: reaching it proves the
+    # caller's bearer token is valid. Lets off-box consumers check their token
+    # without touching task data. PUBLIC_PATHS matches exact paths, not
+    # prefixes, so this route does not inherit /api/health's exemption.
+    return JSONResponse({"ok": True})
+
+
 async def api_inbox(request: Request):
     return JSONResponse([t for t in (things.inbox() or [])])
 
@@ -336,6 +344,7 @@ app = Starlette(
     routes=[
         # REST API endpoints (for automations)
         Route("/api/health", api_health),
+        Route("/api/health/auth", api_health_auth),
         Route("/api/inbox", api_inbox),
         Route("/api/today", api_today),
         Route("/api/upcoming", api_upcoming),
