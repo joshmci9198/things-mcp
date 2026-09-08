@@ -316,10 +316,17 @@ local LAN.
 
 ### Authentication
 
-Every route except `/api/health` requires a bearer token, including `/mcp` —
-the MCP mount grants the same full read/write access to the Things database
-that the REST routes do. Without it, any device on the tailnet could read and
-modify the entire database.
+The `/mcp` mount requires a bearer token. The REST routes under `/api` do
+**not**: their consumers are automations on other tailnet hosts that reach this
+server only through `tailscale serve`, and Tailscale device identity is the
+access control there.
+
+Be honest about what that buys. The REST routes grant the same full read/write
+access to the Things database as `/mcp`, so the token does not keep a tailnet
+device out of the database — it only gates the MCP mount. The real boundary is
+the loopback bind plus the tailnet. If a device you don't trust ever joins the
+tailnet, gate `/api` again (add `"/api"` to `PROTECTED_PREFIXES` in
+`api_server.py`) before worrying about anything else.
 
 ```bash
 printf 'THINGS_MCP_TOKEN=%s\n' "$(openssl rand -hex 32)" >> .env
@@ -333,16 +340,21 @@ rather than serving data if it somehow reaches a request without one. That is
 deliberate — a silent insecure fallback is exactly how `start.sh` previously
 ended up binding `0.0.0.0` and exposing this database to the whole LAN.
 
-Callers pass it as a normal bearer credential:
+MCP clients pass it as a normal bearer credential in their HTTP transport
+config. To check a token from the shell without touching task data:
 
 ```bash
 curl -H "Authorization: Bearer $THINGS_MCP_TOKEN" \
-  https://mac-homeserver.tail1228bf.ts.net:3400/api/today
+  https://mac-homeserver.tail1228bf.ts.net:3400/api/health/auth
 ```
 
-MCP clients need the same header in their HTTP transport config. Anything that
-consumed this API before the token existed — automations on other tailnet
-hosts, shortcuts — will get 401 until updated.
+REST consumers on the tailnet — automations, shortcuts — need no header:
+
+```bash
+curl https://mac-homeserver.tail1228bf.ts.net:3400/api/today
+```
+
+A REST caller that still sends the header is fine; it is ignored.
 
 **Requires Tailscale >= 1.102.** On the macOS `macsys` build at 1.98.2, serve
 silently no-ops: the CLI prints success, the daemon logs the

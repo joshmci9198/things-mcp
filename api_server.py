@@ -25,24 +25,40 @@ from things_mcp import url_scheme
 
 # --- Authentication ---
 
-# Everything except the paths below requires `Authorization: Bearer <token>`,
-# where the token comes from THINGS_MCP_TOKEN (start.sh loads it from .env,
-# which is gitignored). /mcp is covered too: it grants the same full read/write
-# access to the Things database as the REST routes do.
+# Only the /mcp mount requires `Authorization: Bearer <token>`, where the token
+# comes from THINGS_MCP_TOKEN (start.sh loads it from .env, which is gitignored).
+# /api/health/auth is also gated, purely so a caller can check that its token
+# is valid without touching task data.
 #
-# There is deliberately no "no token configured means no auth" mode. This
-# server exposes an unauthenticated view of an entire personal task database,
-# and a silent insecure fallback is precisely how it previously ended up bound
-# to 0.0.0.0 and reachable from the whole LAN. Misconfiguration fails closed.
-PUBLIC_PATHS = frozenset({"/api/health"})
+# The REST routes under /api are NOT token-gated. Their consumers are
+# automations on other tailnet hosts that reach this server only through
+# `tailscale serve`, and Tailscale device identity is the access control there,
+# as it was before the token existed. Be clear about what that means: the REST
+# routes grant the same full read/write access to the Things database as /mcp,
+# so the token does not keep a tailnet device out of the database -- it only
+# gates the MCP mount. The real boundary is the loopback bind plus the tailnet.
+# If a device you don't trust ever joins the tailnet, gate /api again (add
+# "/api" to PROTECTED_PREFIXES) before worrying about anything else.
+#
+# There is deliberately no "no token configured means no auth" mode for the
+# gated paths. A silent insecure fallback is precisely how this server
+# previously ended up bound to 0.0.0.0 and reachable from the whole LAN.
+# Misconfiguration fails closed.
+PROTECTED_PREFIXES = ("/mcp",)
+PROTECTED_PATHS = frozenset({"/api/health/auth"})
 
+
+def _requires_token(path):
+    if path in PROTECTED_PATHS:
+        return True
+    return any(path == prefix or path.startswith(prefix + "/") for prefix in PROTECTED_PREFIXES)
 
 def _expected_token():
     return (os.environ.get("THINGS_MCP_TOKEN") or "").strip()
 
 
 class BearerAuthMiddleware:
-    """Reject requests without a valid bearer token.
+    """Reject requests to token-gated paths without a valid bearer token.
 
     Written as raw ASGI rather than BaseHTTPMiddleware because the MCP mount
     streams responses (SSE), and BaseHTTPMiddleware buffers them.
@@ -52,7 +68,7 @@ class BearerAuthMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("path", "") in PUBLIC_PATHS:
+        if scope["type"] != "http" or not _requires_token(scope.get("path", "")):
             await self.app(scope, receive, send)
             return
 
@@ -97,10 +113,9 @@ async def api_health(request: Request):
 
 
 async def api_health_auth(request: Request):
-    # Same body as /api/health, but NOT in PUBLIC_PATHS: reaching it proves the
-    # caller's bearer token is valid. Lets off-box consumers check their token
-    # without touching task data. PUBLIC_PATHS matches exact paths, not
-    # prefixes, so this route does not inherit /api/health's exemption.
+    # Same body as /api/health, but listed in PROTECTED_PATHS: reaching it
+    # proves the caller's bearer token is valid. Lets an MCP client check its
+    # token with a plain curl, without touching task data.
     return JSONResponse({"ok": True})
 
 
@@ -342,7 +357,7 @@ app = Starlette(
     lifespan=mcp_app.lifespan,
     middleware=[Middleware(BearerAuthMiddleware)],
     routes=[
-        # REST API endpoints (for automations)
+        # REST API endpoints (for automations). No bearer token here: tailnet-only.
         Route("/api/health", api_health),
         Route("/api/health/auth", api_health_auth),
         Route("/api/inbox", api_inbox),
@@ -361,7 +376,8 @@ app = Starlette(
         Route("/api/ssnc/completed", api_ssnc_completed),
         Route("/api/update/todo", api_update_todo, methods=["POST"]),
         Route("/api/update/project", api_update_project, methods=["POST"]),
-        # MCP protocol endpoint (for Claude / agents) — must be last
+        # MCP protocol endpoint (for Claude / agents) — must be last.
+        # Bearer token required (see PROTECTED_PREFIXES).
         Mount("/mcp", mcp_app),
     ],
 )

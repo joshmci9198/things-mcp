@@ -8,7 +8,7 @@
 
 ## 1. Why this exists
 
-- The Things 3 task database currently lives on `mac-homeserver`, a 2016 MacBook Pro on macOS 12.7.6 running Things **3.22.10**, exposed to the tailnet through the API in `things-mcp-wired` (`api_server.py` REST routes + an MCP server on `/mcp`, port 3400, bearer-token auth).
+- The Things 3 task database currently lives on `mac-homeserver`, a 2016 MacBook Pro on macOS 12.7.6 running Things **3.22.10**, exposed to the tailnet through the API in `things-mcp-wired` (`api_server.py` REST routes + an MCP server on `/mcp`, port 3400, bearer-token auth on `/mcp`; the REST routes are tailnet-only with no token as of 2026-09-08).
 - Things **3.23** (2026-08-19) requires macOS 13.3. The 2016 MacBook Pro cannot run macOS 13 through any supported path.
 - On **2026-08-26 05:00 PT** Things Cloud stopped syncing with the 3.22.10 client (last successful sync in its own metadata; two local changes have sat in its outbound queue since; the app holds no connection to the cloud). The API is serving a snapshot frozen at that moment. The user's laptop and phone run 3.23 and are current.
 - Decision: **replace Things with a self-hosted backend on the Linux homeserver.** The user will supply their own Mac and iPhone clients. Things' own apps cannot be pointed at a third-party server (private protocol), so this is a replacement, not a re-hosting.
